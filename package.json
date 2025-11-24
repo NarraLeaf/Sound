@@ -1,0 +1,46 @@
+{
+    "name": "@narraleaf/sound",
+    "version": "0.1.0",
+    "description": "A lightweight and modern HTML audio management solution, suitable for simple web games.",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "directories": {
+        "doc": "docs"
+    },
+    "exports": {
+        ".": {
+            "require": "./dist/index.js",
+            "types": "./dist/index.d.ts"
+        }
+    },
+    "scripts": {
+        "build:browser": "esbuild src/index.ts --bundle --platform=browser --format=esm --outfile=dist/index.js",
+        "build:types": "tsc --emitDeclarationOnly",
+        "build": "npm run build:browser -- --minify && npm run build:types",
+        "prepublishOnly": "npm run build"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/NarraLeaf/Sound.git"
+    },
+    "devDependencies": {
+        "esbuild": "^0.19.0",
+        "typescript": "^5.0.0"
+    },
+    "keywords": [
+        "narraleaf",
+        "game-engine",
+        "audio",
+        "sound",
+        "web-audio",
+        "html-audio",
+        "html-audio-management"
+    ],
+    "author": "helloyork@icloud.com",
+    "license": "MIT",
+    "type": "commonjs",
+    "bugs": {
+        "url": "https://github.com/NarraLeaf/Sound/issues"
+    },
+    "packageManager": "yarn@4.10.3+sha512.c38cafb5c7bb273f3926d04e55e1d8c9dfa7d9c3ea1f36a4868fa028b9e5f72298f0b7f401ad5eb921749eb012eb1c3bb74bf7503df3ee43fd600d14a018266f"
+}
