@@ -10,11 +10,15 @@
   - [mute(muted: boolean): this](#mute-muted-boolean-this)
   - [unmute(): this](#unmute-this)
   - [createChannel(name: string, options?: ChannelOptions): Channel](#createchannelname-string-options-channeloptions-channel)
+  - [getChannel(name: string): Channel | null](#getchannelname-string-channel--null)
   - [load(path: string): Promise<CachedAudio>](#loadpath-string-promise-cachedaudio)
   - [destroy(): void](#destroy-void)
   - [play(path: string | CachedAudio, options?: PlayOptions): Promise<SoundToken>](#playpath-string--cachedaudio-options-playoptions-promise)
+  - [getTokens(): SoundToken[]](#gettokens-soundtoken)
 - [Channel](#channel)
   - [play(path: string | CachedAudio, options?: PlayOptions): Promise<SoundToken>](#channel)
+  - [createChannel(name: string, options?: ChannelOptions): Channel](#createchannelname-string-options-channeloptions-channel-1)
+  - [getChannel(name: string): Channel | null](#getchannelname-string-channel--null-1)
   - [setVolume(volume: number): this](#setvolumevolume-number-this-1)
   - [getVolume(): number](#getvolume-number-1)
   - [mute(): this](#mute-this-1)
@@ -22,13 +26,14 @@
   - [unmute(): this](#unmute-this-1)
   - [isMuted(): boolean](#ismuted-boolean-1)
   - [remove(): this](#remove-this)
+  - [getTokens(): SoundToken[]](#gettokens-soundtoken-1)
 - [CachedAudio](#cachedaudio)
   - [unload(): Promise<void>](#unload-promise-void)
   - [forceUnload(): Promise<void>](#forceunload-promise-void)
   - [isAlive(): boolean](#isalive-boolean)
   - [raw(): AudioBuffer](#raw-audiobuffer)
 - [SoundToken](#soundtoken)
-  - [stop(): this](#stop-this)
+  - [stop(StopOptions?: StopOptions): this](#stopstopoptions-stopoptions-this)
   - [setVolume(volume: number): this](#setvolumevolume-number-this-2)
   - [getVolume(): number](#getvolume-number-2)
   - [mute(): this](#mute-this-2)
@@ -115,7 +120,8 @@ Check if the current `Sound` instance is muted.
 
 ### createChannel(name: string, options?: ChannelOptions): Channel
 
-Create a new channel.  
+Create a new channel. If a channel with the same name already exists, an error will be thrown.
+
 ```ts
 const channel = sound.createChannel("channel-name", {
     // The volume of the channel.
@@ -140,6 +146,17 @@ interface ChannelOptions {
      * @range [1, Infinity]
      */
     limit?: number;
+}
+```
+
+### getChannel(name: string): Channel | null
+
+Get a channel by name. Returns the channel if it exists, otherwise returns null.
+
+```ts
+const channel = sound.getChannel("channel-name");
+if (channel) {
+    channel.play("path/to/sound.mp3");
 }
 ```
 
@@ -210,13 +227,24 @@ interface PlayOptions {
      * - "full": Load the entire audio file into memory.
      * - "auto": Automatically determine the loading mode based on the audio file's size. If it fails to determine the loading mode, it will use "stream" by default. For more details, please refer to [Behavior](https://github.com/NarraLeaf/Sound/blob/master/doc/behavior.md).
      */
-    load?: "full" | "partial";
+    load?: "stream" | "full" | "auto";
     /**
      * Loop the token.
      * @default false
      */
     loop?: boolean;
 }
+```
+
+### getTokens(): SoundToken[]
+
+Get all currently playing sound tokens managed by this Sound instance.
+
+```ts
+const tokens = sound.getTokens();
+tokens.forEach(token => {
+    token.stop({ fadeDuration: 1000 });
+});
 ```
 
 ## Channel
@@ -228,7 +256,7 @@ For example, the following code creates a tree of channels:
 ```ts
 const sound = new Sound();
 const channel = sound.createChannel("channel-name", { volume: 0.5 });
-const subChannel = channel.createSubChannel("sub-channel-name", { volume: 0.5 });
+const subChannel = channel.createChannel("sub-channel-name", { volume: 0.5 });
 
 const token = await subChannel.play("path/to/sound.mp3");
 ```  
@@ -236,7 +264,29 @@ The sound will be played at 50% x 50% = 25% volume.
 
 ### play(path: string | CachedAudio, options?: PlayOptions): Promise<SoundToken>
 
-Play a sound. The Channel will load the sound file and play it. 
+Play a sound. The Channel will load the sound file and play it.
+
+### createChannel(name: string, options?: ChannelOptions): Channel
+
+Create a new sub-channel. If a channel with the same name already exists, an error will be thrown.
+
+```ts
+const subChannel = channel.createChannel("sub-channel-name", {
+    volume: 0.5,
+    limit: 1
+});
+```
+
+### getChannel(name: string): Channel | null
+
+Get a sub-channel by name. Returns the sub-channel if it exists, otherwise returns null.
+
+```ts
+const subChannel = channel.getChannel("sub-channel-name");
+if (subChannel) {
+    subChannel.play("path/to/sound.mp3");
+}
+```
 
 ### setVolume(volume: number): this
 
@@ -288,16 +338,32 @@ channel.remove(); // Remove the channel from the sound instance
 channel.play(/* ... */); // This will throw an error
 ```
 
+### getTokens(): SoundToken[]
+
+Get all currently playing sound tokens managed by this Channel instance, including tokens from all sub-channels.
+
+```ts
+const tokens = channel.getTokens();
+tokens.forEach(token => {
+    token.setVolume(0.5);
+});
+```
+
 ## CachedAudio
 
-`CachedAudio` is a class that represents a cached sound file. It can be used to play the cached audio. The cached audio will be unloaded automatically when all tokens playing the audio are stopped.
+`CachedAudio` is a class that represents a cached sound file. It can be used to play the cached audio.
 
 ### unload(): Promise<void>
 
-Unload the cached audio.
+Unload the cached audio. This method will unload the audio only if there are no tokens playing the audio. This method will silently fail if the action
+is not successful.
 
 ```ts
 await cachedAudio.unload();
+
+if (cachedAudio.isAlive()) {
+    console.log("Cached audio is still alive, some tokens are still playing it");
+}
 ```
 
 ### forceUnload(): Promise<void>
@@ -326,17 +392,30 @@ Get the raw audio buffer of the cached audio.
 
 `SoundToken` is a class that represents a token that is playing a sound. It can be used to control the playback of the sound.
 
-### stop(): this
+### stop(StopOptions?: StopOptions): this
 
 Stop the token. The token will be cleaned up and cannot be used anymore.
 
 ```ts
-token.stop();
+token.stop(); // Stop immediately
+token.stop({ fadeDuration: 1000 }); // Stop with a fade out with 1000ms duration
+```
+
+The `StopOptions` is defined as follows:  
+```ts
+interface StopOptions {
+    /**
+     * The duration of the fade out. When specified, the token will fade out to 0 over the duration.
+     * @default 0
+     * @range [0, Infinity]
+     */
+    fadeDuration?: number;
+}
 ```
 
 ### setVolume(volume: number): this
 
-Set the volume of the token. The volume is a number between 0 and 1.
+Set the volume of the token. The volume is a number between 0 and 1. This method will stop any ongoing fade effect and set the volume immediately.
 
 ```ts
 token.setVolume(0.5); // Set volume to 50%
@@ -471,6 +550,30 @@ await fadeToken.finished; // Wait for fade to complete
 
 // Fade out from current volume to 0 over 500ms
 token.fade(token.getVolume(), 0, 500);
+```
+
+To cancel a fade, you can call the `cancel` method on the `FadeToken`.
+
+```ts
+fadeToken.cancel();
+```
+
+The `FadeToken` is defined as follows:
+```ts
+interface FadeToken {
+    /**
+     * Wait for the fade to complete.
+     */
+    finished: Promise<void>;
+    /**
+     * Cancel the fade.
+     */
+    cancel(): void;
+    /**
+     * Finish the fade immediately.
+     */
+    finish(): void;
+}
 ```
 
 ### on(event: string, callback: Function): this
