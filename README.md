@@ -33,7 +33,7 @@ To create multiple sound channels, you can use the `createChannel` method:
 ```ts
 const channel = sound.createChannel("channel-name");
 
-const subChannel = channel.createSubChannel("sub-channel-name", {
+const subChannel = channel.createChannel("sub-channel-name", {
     // Only allow 1 token to play at a time
     // If more than 1 token is playing, the oldest token will be stopped immediately
     limit: 1,
