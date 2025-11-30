@@ -6,19 +6,24 @@
   - [constructor(options?: SoundOptions)](#constructoroptions-soundoptions)
   - [onceReady(): Promise<this>](#onceready-promise-this)
   - [setVolume(volume: number): this](#setvolumevolume-number-this)
+  - [getVolume(): number](#getvolume-number)
   - [mute(): this](#mute-this)
   - [mute(muted: boolean): this](#mute-muted-boolean-this)
   - [unmute(): this](#unmute-this)
+  - [isMuted(): boolean](#ismuted-boolean)
   - [createChannel(name: string, options?: ChannelOptions): Channel](#createchannelname-string-options-channeloptions-channel)
   - [getChannel(name: string): Channel | null](#getchannelname-string-channel--null)
+  - [getChannels(): Channel[]](#getchannels-channel)
   - [load(path: string): Promise<CachedAudio>](#loadpath-string-promise-cachedaudio)
   - [destroy(): void](#destroy-void)
   - [play(path: string | CachedAudio, options?: PlayOptions): Promise<SoundToken>](#playpath-string--cachedaudio-options-playoptions-promise)
   - [getTokens(): SoundToken[]](#gettokens-soundtoken)
 - [Channel](#channel)
+  - [getName(): string](#getname-string)
   - [play(path: string | CachedAudio, options?: PlayOptions): Promise<SoundToken>](#channel)
   - [createChannel(name: string, options?: ChannelOptions): Channel](#createchannelname-string-options-channeloptions-channel-1)
   - [getChannel(name: string): Channel | null](#getchannelname-string-channel--null-1)
+  - [getChannels(): Channel[]](#getchannels-channel-1)
   - [setVolume(volume: number): this](#setvolumevolume-number-this-1)
   - [getVolume(): number](#getvolume-number-1)
   - [mute(): this](#mute-this-1)
@@ -70,7 +75,25 @@ interface SoundOptions {
      * @default 1
      * @range [0, 1]
      */
-    volume?: number;
+    volume: number;
+    /**
+     * The latency hint of the sound context.
+     * @default "interactive"
+     * @enum ["balanced", "interactive", "playback"]
+     */
+    latencyHint: "balanced" | "interactive" | "playback";
+    /**
+     * The sample rate of the sound context.
+     * @default 44100
+     * @range [1, Infinity]
+     */
+    sampleRate: number;
+    /**
+     * The maximum number of channels that can be created.
+     * @default 128
+     * @range [1, Infinity]
+     */
+    maxChannels: number;
 }
 ```
 
@@ -160,6 +183,18 @@ if (channel) {
 }
 ```
 
+### getChannels(): Channel[]
+
+Get all direct child channels managed by this Sound instance.
+
+```ts
+const channels = sound.getChannels();
+channels.forEach(channel => {
+    console.log(channel.getName()); // Print channel name
+    channel.setVolume(0.5);
+});
+```
+
 ### load(path: string): Promise<CachedAudio>
 
 Load a sound file and cache it.
@@ -223,7 +258,7 @@ interface PlayOptions {
      * Specify the loading mode. 
      * @default "auto"
      * @enum ["stream", "full", "auto"]
-     * - "stream": Use `<audio>` element to play the audio.
+     * - "stream": Use `<audio>` element with MediaElementAudioSourceNode to play the audio.
      * - "full": Load the entire audio file into memory.
      * - "auto": Automatically determine the loading mode based on the audio file's size. If it fails to determine the loading mode, it will use "stream" by default. For more details, please refer to [Behavior](https://github.com/NarraLeaf/Sound/blob/master/doc/behavior.md).
      */
@@ -262,6 +297,15 @@ const token = await subChannel.play("path/to/sound.mp3");
 ```  
 The sound will be played at 50% x 50% = 25% volume.
 
+### getName(): string
+
+Get the name of this channel.
+
+```ts
+const channel = sound.createChannel("bgm", { volume: 0.8 });
+console.log(channel.getName()); // "bgm"
+```
+
 ### play(path: string | CachedAudio, options?: PlayOptions): Promise<SoundToken>
 
 Play a sound. The Channel will load the sound file and play it.
@@ -286,6 +330,18 @@ const subChannel = channel.getChannel("sub-channel-name");
 if (subChannel) {
     subChannel.play("path/to/sound.mp3");
 }
+```
+
+### getChannels(): Channel[]
+
+Get all direct sub-channels of this channel.
+
+```ts
+const subChannels = channel.getChannels();
+subChannels.forEach(subChannel => {
+    console.log(subChannel.getName());
+    subChannel.setVolume(0.5);
+});
 ```
 
 ### setVolume(volume: number): this
@@ -394,11 +450,11 @@ Get the raw audio buffer of the cached audio.
 
 ### stop(StopOptions?: StopOptions): this
 
-Stop the token. The token will be cleaned up and cannot be used anymore.
+Stop the token. When called without options, the token will be cleaned up immediately and cannot be used anymore. When called with a `fadeDuration`, the token will fade out over the specified duration and then be cleaned up. During the fade out period, the token can still be controlled (e.g., volume changes will be applied).
 
 ```ts
 token.stop(); // Stop immediately
-token.stop({ fadeDuration: 1000 }); // Stop with a fade out with 1000ms duration
+token.stop({ fadeDuration: 1000 }); // Fade out over 1000ms, then stop
 ```
 
 The `StopOptions` is defined as follows:  
@@ -415,10 +471,10 @@ interface StopOptions {
 
 ### setVolume(volume: number): this
 
-Set the volume of the token. The volume is a number between 0 and 1. This method will stop any ongoing fade effect and set the volume immediately.
+Set the volume of the token. The volume is a number between 0 and 1. This method will stop any ongoing fade effect and set the volume immediately. **Note**: If the token is in the process of stopping with a fade out (via `stop({ fadeDuration })`), calling `setVolume()` will cancel the fade out and immediately stop the token.
 
 ```ts
-token.setVolume(0.5); // Set volume to 50%
+token.setVolume(0.5); // Set volume to 50%, cancelling any ongoing fade effects
 ```
 
 ### getVolume(): number
@@ -431,7 +487,7 @@ const volume = token.getVolume(); // Returns a number between 0 and 1
 
 ### mute(): this
 
-Mute the token.
+Mute the token. If there is an ongoing fade effect, it will skip to the target volume immediately instead of cancelling the fade.
 
 ```ts
 token.mute();
@@ -439,7 +495,7 @@ token.mute();
 
 ### mute(muted: boolean): this
 
-Mute or unmute the token.
+Mute or unmute the token. If there is an ongoing fade effect, it will skip to the target volume immediately instead of cancelling the fade.
 
 ```ts
 token.mute(false); // Unmute the token
@@ -541,38 +597,49 @@ if (token.isPaused()) {
 
 ### fade(from: number, to: number, duration: number): FadeToken
 
-Create a fade effect on the token's volume. Returns a `FadeToken` that can be used to control the fade.
+Create a fade effect on the token's volume. Returns a `FadeToken` that can be used to control the fade. If there is already an ongoing fade on this token, it will be cancelled and replaced with the new fade.
 
 ```ts
 // Fade in from 0 to 1.0 over 1000ms
 const fadeToken = token.fade(0, 1.0, 1000);
 await fadeToken.finished; // Wait for fade to complete
 
-// Fade out from current volume to 0 over 500ms
+// This will cancel the previous fade and start a new one
 token.fade(token.getVolume(), 0, 500);
 ```
 
-To cancel a fade, you can call the `cancel` method on the `FadeToken`.
+To cancel a fade, you can call the `cancel` method on the `FadeToken`. This stops the fade without setting the volume to the target value.
 
 ```ts
 fadeToken.cancel();
+```
+
+To finish a fade immediately (skipping to the end), you can call the `finish` method. This sets the volume to the target value immediately.
+
+```ts
+fadeToken.finish();
 ```
 
 The `FadeToken` is defined as follows:
 ```ts
 interface FadeToken {
     /**
-     * Wait for the fade to complete.
+     * Wait for the fade to complete, either naturally or by being cancelled.
+     * The promise resolves when the fade finishes normally, or when cancel() or finish() is called.
      */
     finished: Promise<void>;
     /**
-     * Cancel the fade.
+     * Cancel the fade. This will resolve the finished promise.
      */
     cancel(): void;
     /**
-     * Finish the fade immediately.
+     * Finish the fade immediately. This will resolve the finished promise.
      */
     finish(): void;
+    /**
+     * Get the target volume of the fade.
+     */
+    getTargetVolume(): number;
 }
 ```
 
