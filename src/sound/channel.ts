@@ -1,5 +1,6 @@
 import { SoundToken } from "./soundToken";
 import { ChannelOptions, PlayOptions, CachedAudio, IChannel, IAudioProvider } from "./types";
+import { warn } from "./logger";
 
 /**
  * Default options for Channel instances.
@@ -18,6 +19,8 @@ export class Channel implements IChannel {
     private readonly options: Required<ChannelOptions>;
     private readonly subChannels: Map<string, Channel> = new Map();
     private readonly tokens: Set<SoundToken> = new Set();
+    // Maintain an explicit play order queue to avoid relying on Set iteration order semantics.
+    private readonly tokenQueue: SoundToken[] = [];
     private readonly audioProvider: IAudioProvider;
     private readonly parentChannel: Channel | null;
     
@@ -93,18 +96,27 @@ export class Channel implements IChannel {
 
         // Check if we've reached the token limit
         if (this.tokens.size >= this.options.limit) {
-            const oldestToken = this.tokens.values().next().value;
-            if (oldestToken) {
-                oldestToken.stop();
+            const tokenToStop = this.tokenQueue.shift();
+            if (tokenToStop) {
+                tokenToStop.stop();
             }
         }
 
         const token = await this.audioProvider.createToken(source, options, this.gainNode);
         this.tokens.add(token);
+        this.tokenQueue.push(token);
 
         // Listen for token end to clean up
-        token.once("ended", () => this.tokens.delete(token));
-        token.once("stop", () => this.tokens.delete(token));
+        const removeFromCollections = () => {
+            this.tokens.delete(token);
+            const index = this.tokenQueue.indexOf(token);
+            if (index !== -1) {
+                this.tokenQueue.splice(index, 1);
+            }
+        };
+
+        token.once("ended", removeFromCollections);
+        token.once("stop", removeFromCollections);
 
         return token;
     }
@@ -225,8 +237,10 @@ export class Channel implements IChannel {
         // Disconnect from parent
         try {
             this.gainNode.disconnect();
-        } catch {
-            // Ignore disconnect errors
+        } catch (error) {
+            // Best-effort disconnect; log and continue
+            // eslint-disable-next-line no-console
+            console.warn("Failed to disconnect Channel gain node during remove().", error);
         }
 
         // Unregister from audio provider

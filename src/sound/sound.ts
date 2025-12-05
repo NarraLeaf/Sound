@@ -8,6 +8,7 @@ import {
     CachedAudio,
     IAudioProvider
 } from "./types";
+import { setSilentLogging, warn } from "./logger";
 
 /**
  * Threshold for auto load mode decision (10 MB in bytes).
@@ -90,6 +91,7 @@ const DEFAULT_SOUND_OPTIONS: Required<SoundOptions> = {
     latencyHint: "interactive",
     sampleRate: 44100,
     maxChannels: 128,
+    silent: false,
 };
 
 /**
@@ -106,9 +108,13 @@ export class Sound implements IAudioProvider {
     private isReady: boolean = false;
     private readyPromise: Promise<void> | null = null;
     private destroyed: boolean = false;
+    private unlockHandler: (() => void) | null = null;
 
     constructor(options?: Partial<SoundOptions>) {
         this.options = { ...DEFAULT_SOUND_OPTIONS, ...options };
+
+        // Configure global logging behavior
+        setSilentLogging(!!this.options.silent);
 
         this.audioContext = new AudioContext({
             latencyHint: this.options.latencyHint,
@@ -161,20 +167,44 @@ export class Sound implements IAudioProvider {
 
         return new Promise((resolve) => {
             const unlock = () => {
+                // If already destroyed, do not attempt to resume
+                if (this.destroyed) {
+                    this.clearUnlockHandler();
+                    resolve();
+                    return;
+                }
+
                 this.audioContext.resume().then(() => {
                     if (this.audioContext.state === "running") {
-                        document.removeEventListener("click", unlock);
-                        document.removeEventListener("touchstart", unlock);
-                        document.removeEventListener("keydown", unlock);
+                        this.clearUnlockHandler();
                         this.isReady = true;
                         resolve();
                     }
+                }).catch((error) => {
+                    warn("Failed to resume AudioContext while unlocking.", error);
                 });
             };
+
+            this.unlockHandler = unlock;
+
             document.addEventListener("click", unlock);
             document.addEventListener("touchstart", unlock);
             document.addEventListener("keydown", unlock);
         });
+    }
+
+    /**
+     * Clear unlock event listeners if they have been registered.
+     */
+    private clearUnlockHandler(): void {
+        if (!this.unlockHandler || typeof document === "undefined") return;
+
+        const handler = this.unlockHandler;
+        this.unlockHandler = null;
+
+        document.removeEventListener("click", handler);
+        document.removeEventListener("touchstart", handler);
+        document.removeEventListener("keydown", handler);
     }
 
     /**
@@ -183,6 +213,16 @@ export class Sound implements IAudioProvider {
     private ensureNotDestroyed(): void {
         if (this.destroyed) {
             throw new Error("Sound instance has been destroyed and cannot be used.");
+        }
+    }
+
+    /**
+     * Ensure the audio context is ready (unlocked).
+     * Throws if not yet ready.
+     */
+    private ensureReady(): void {
+        if (!this.isReady) {
+            throw new Error("Audio context is not ready. Call onceReady() and wait for it to resolve before creating channels or playing audio.");
         }
     }
 
@@ -202,6 +242,7 @@ export class Sound implements IAudioProvider {
         outputNode: GainNode
     ): Promise<SoundToken> {
         this.ensureNotDestroyed();
+        this.ensureReady();
 
         const {
             volume = 1,
@@ -308,8 +349,9 @@ export class Sound implements IAudioProvider {
 
             // < 10MB use full mode, otherwise stream
             return size < AUTO_LOAD_THRESHOLD ? "full" : "stream";
-        } catch {
+        } catch (error) {
             // Network error or other issues, fallback to stream
+            warn("Failed to resolve load mode via HEAD request, falling back to 'stream'.", error);
             return "stream";
         }
     }
@@ -357,6 +399,7 @@ export class Sound implements IAudioProvider {
      */
     public setVolume(volume: number): this {
         this.ensureNotDestroyed();
+        this.ensureReady();
         this.masterChannel.setVolume(volume);
         return this;
     }
@@ -365,6 +408,8 @@ export class Sound implements IAudioProvider {
      * Get the master volume.
      */
     public getVolume(): number {
+        this.ensureNotDestroyed();
+        this.ensureReady();
         return this.masterChannel.getVolume();
     }
 
@@ -375,6 +420,7 @@ export class Sound implements IAudioProvider {
     public mute(muted: boolean): this;
     public mute(muted?: boolean): this {
         this.ensureNotDestroyed();
+        this.ensureReady();
         if (muted === undefined) {
             this.masterChannel.mute();
         } else {
@@ -388,6 +434,7 @@ export class Sound implements IAudioProvider {
      */
     public unmute(): this {
         this.ensureNotDestroyed();
+        this.ensureReady();
         this.masterChannel.unmute();
         return this;
     }
@@ -396,6 +443,8 @@ export class Sound implements IAudioProvider {
      * Check if audio is muted.
      */
     public isMuted(): boolean {
+        this.ensureNotDestroyed();
+        this.ensureReady();
         return this.masterChannel.isMuted();
     }
 
@@ -406,6 +455,7 @@ export class Sound implements IAudioProvider {
      */
     public createChannel(name: string, options?: ChannelOptions): Channel {
         this.ensureNotDestroyed();
+        this.ensureReady();
         return this.masterChannel.createChannel(name, options);
     }
 
@@ -415,6 +465,7 @@ export class Sound implements IAudioProvider {
      */
     public getChannel(name: string): Channel | null {
         this.ensureNotDestroyed();
+        this.ensureReady();
         return this.masterChannel.getChannel(name);
     }
 
@@ -423,6 +474,7 @@ export class Sound implements IAudioProvider {
      */
     public getChannels(): Channel[] {
         this.ensureNotDestroyed();
+        this.ensureReady();
         return this.masterChannel.getChannels();
     }
 
@@ -432,6 +484,7 @@ export class Sound implements IAudioProvider {
      */
     public async load(path: string): Promise<CachedAudio> {
         this.ensureNotDestroyed();
+        this.ensureReady();
         return this.audioCache.load(path);
     }
 
@@ -443,6 +496,7 @@ export class Sound implements IAudioProvider {
      */
     public async play(source: string | CachedAudio, options?: PlayOptions): Promise<SoundToken> {
         this.ensureNotDestroyed();
+        this.ensureReady();
         return this.masterChannel.play(source, options);
     }
 
@@ -451,6 +505,7 @@ export class Sound implements IAudioProvider {
      */
     public getTokens(): SoundToken[] {
         this.ensureNotDestroyed();
+        this.ensureReady();
         return this.masterChannel.getTokens();
     }
 
@@ -463,6 +518,9 @@ export class Sound implements IAudioProvider {
         // Mark as destroyed first to prevent concurrent operations
         this.destroyed = true;
 
+        // Clear unlock handler and related event listeners if any
+        this.clearUnlockHandler();
+
         // Clear the audio cache to free memory
         this.audioCache.clear();
 
@@ -471,8 +529,8 @@ export class Sound implements IAudioProvider {
         this.registeredChannels.clear();
 
         // Close the audio context
-        this.audioContext.close().catch(() => {
-            // Ignore close errors
+        this.audioContext.close().catch((error) => {
+            warn("Failed to close AudioContext during destroy().", error);
         });
     }
 

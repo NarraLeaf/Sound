@@ -1,6 +1,7 @@
 import { AudioSourceController } from "./audioSourceController";
 import { FadeTokenImpl } from "./fadeTokenImpl";
 import { StopOptions, FadeToken } from "./types";
+import { warn } from "./logger";
 
 export class SoundToken {
     // Audio nodes and connections
@@ -49,7 +50,7 @@ export class SoundToken {
         this.sourceController = new AudioSourceController(audioContext, this.gainNode);
         this.sourceController.setSource(source);
 
-        // -------------- Auto start playback -----------------
+        // Auto start playback
         const offset = this.startTime;
         this.sourceController.start(0, offset);
         this._isPlaying = true;
@@ -73,8 +74,9 @@ export class SoundToken {
             // Clean up resources on natural end
             try {
                 this.gainNode.disconnect();
-            } catch {
-                // Ignore disconnect errors
+            } catch (error) {
+                // Best-effort disconnect; log and continue
+                warn("Failed to disconnect gain node on natural end.", error);
             }
         }
     }
@@ -159,11 +161,15 @@ export class SoundToken {
 
         const source = this.sourceController.getSource();
         if (source instanceof HTMLAudioElement) {
-            source.play().catch(() => {
-                // If play fails (e.g., due to browser autoplay policy), rollback state
-                this._isPlaying = false;
-                this._isPaused = true;
-            });
+            const playResult = source.play();
+            // Older browsers may return void instead of Promise
+            if (playResult && typeof (playResult as Promise<void>).catch === "function") {
+                (playResult as Promise<void>).catch(() => {
+                    // If play fails (e.g., due to browser autoplay policy), rollback state
+                    this._isPlaying = false;
+                    this._isPaused = true;
+                });
+            }
         } else if (source instanceof AudioBufferSourceNode) {
             // Create a new source node and resume from pause time
             const newSource = this.audioContext.createBufferSource();
@@ -218,8 +224,9 @@ export class SoundToken {
         this.sourceController.destroy();
         try {
             this.gainNode.disconnect();
-        } catch {
-            // Ignore disconnect errors
+        } catch (error) {
+            // Best-effort disconnect; log and continue
+            warn("Failed to disconnect gain node on stop().", error);
         }
     }
 

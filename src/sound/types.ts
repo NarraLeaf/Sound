@@ -27,6 +27,11 @@ export interface SoundOptions {
      * @range [1, Infinity]
      */
     maxChannels?: number;
+    /**
+     * Whether to silence non-critical warnings (such as best-effort disconnect/stop failures).
+     * @default false
+     */
+    silent?: boolean;
 }
 
 export interface ChannelOptions {

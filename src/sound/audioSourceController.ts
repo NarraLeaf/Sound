@@ -1,3 +1,5 @@
+import { warn } from "./logger";
+
 export interface EventListener {
     callback: Function;
     once: boolean;
@@ -90,8 +92,9 @@ export class AudioSourceController {
             if (this.currentSource instanceof AudioBufferSourceNode) {
                 try {
                     this.currentSource.disconnect();
-                } catch {
-                    // Ignore disconnect errors
+                } catch (error) {
+                    // Best-effort disconnect; log and continue
+                    warn("Failed to disconnect AudioBufferSourceNode in disconnectSource().", error);
                 }
             } else if (this.currentSource instanceof HTMLAudioElement) {
                 // Clean up HTMLAudioElement resources
@@ -103,8 +106,9 @@ export class AudioSourceController {
             if (this.mediaElementSource) {
                 try {
                     this.mediaElementSource.disconnect();
-                } catch {
-                    // Ignore disconnect errors
+                } catch (error) {
+                    // Best-effort disconnect; log and continue
+                    warn("Failed to disconnect MediaElementAudioSourceNode in disconnectSource().", error);
                 }
                 this.mediaElementSource = null;
             }
@@ -214,8 +218,9 @@ export class AudioSourceController {
             } else if (this.currentSource instanceof AudioBufferSourceNode) {
                 try {
                     this.currentSource.stop();
-                } catch {
-                    // Ignore stop errors (e.g., if already stopped)
+                } catch (error) {
+                    // Best-effort stop; log and continue
+                    warn("Failed to stop AudioBufferSourceNode in stop().", error);
                 }
             }
         }
