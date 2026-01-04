@@ -268,9 +268,10 @@ export class Channel implements IChannel {
     public getTokens(): SoundToken[] {
         this.ensureNotRemoved();
 
-        const allTokens: SoundToken[] = Array.from(this.tokens);
+        // Preserve play order using explicit queue
+        const allTokens: SoundToken[] = [...this.tokenQueue];
 
-        // Recursively collect tokens from sub-channels
+        // Recursively collect tokens from sub-channels in their own play order
         for (const subChannel of this.subChannels.values()) {
             allTokens.push(...subChannel.getTokens());
         }

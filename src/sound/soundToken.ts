@@ -16,8 +16,24 @@ export class SoundToken {
     private _isMuted = false;
     private volume = 1;
     private rate = 1;
-    private startTime = 0;
-    private pauseTime = 0;
+    /**
+     * Time (AudioContext.currentTime) when current playback started.
+     */
+    /**
+     * The AudioContext.currentTime when the current play session began.
+     */
+    /**
+     * AudioContext.currentTime when current play session began.
+     */
+    private contextStartTime = 0;
+    /**
+     * Offset (seconds) inside the media where this session began.
+     */
+    private startOffset = 0;
+    /**
+     * Offset recorded when paused (used for resume).
+     */
+    private pauseOffset = 0;
     private duration = 0;
 
     // Fade system
@@ -29,7 +45,7 @@ export class SoundToken {
         options: {
             volume?: number;
             rate?: number;
-            startTime?: number;
+            startOffset?: number;
             duration?: number;
         } = {},
         outputNode?: AudioNode
@@ -37,7 +53,7 @@ export class SoundToken {
         this.audioContext = audioContext;
         this.volume = options.volume ?? 1;
         this.rate = options.rate ?? 1;
-        this.startTime = options.startTime ?? 0;
+        this.startOffset = options.startOffset ?? 0;
         this.duration = options.duration ?? 0;
         this.outputNode = outputNode ?? audioContext.destination;
 
@@ -51,8 +67,10 @@ export class SoundToken {
         this.sourceController.setSource(source);
 
         // Auto start playback
-        const offset = this.startTime;
+        const offset = this.startOffset;
         this.sourceController.start(0, offset);
+        // Store the context time when playback actually starts to calculate offsets correctly
+        this.contextStartTime = this.audioContext.currentTime;
         this._isPlaying = true;
 
         // If duration >0 schedule stop
@@ -143,10 +161,11 @@ export class SoundToken {
         const source = this.sourceController.getSource();
         if (source instanceof HTMLAudioElement) {
             source.pause();
-            this.pauseTime = source.currentTime;
+            this.pauseOffset = source.currentTime;
         } else if (source instanceof AudioBufferSourceNode) {
             // For AudioBufferSourceNode, we need to track time manually
-            this.pauseTime = this.audioContext.currentTime - this.startTime;
+            // Capture exact playback position accounting for playbackRate
+            this.pauseOffset = this.getCurrentTime();
             this.sourceController.stop();
         }
 
@@ -181,8 +200,9 @@ export class SoundToken {
             newSource.loopEnd = source.loopEnd;
 
             this.sourceController.refreshSource(newSource);
-            this.startTime = this.audioContext.currentTime - this.pauseTime;
-            this.sourceController.start(0, this.pauseTime);
+            this.startOffset = this.pauseOffset;
+            this.contextStartTime = this.audioContext.currentTime;
+            this.sourceController.start(0, this.pauseOffset);
         }
 
         this._isPlaying = true;
@@ -269,11 +289,11 @@ export class SoundToken {
                     newSource.loopStart = source.loopStart;
                     newSource.loopEnd = source.loopEnd;
                     this.sourceController.refreshSource(newSource);
-                    this.startTime = this.audioContext.currentTime - time;
+                    this.startOffset = this.audioContext.currentTime - time;
                     this.sourceController.start(0, time);
                 } else if (this._isPaused) {
                     // Paused - just update the pause time, will be used on resume
-                    this.pauseTime = time;
+                    this.pauseOffset = time;
                 }
                 this.emit('seek');
             }
@@ -288,9 +308,9 @@ export class SoundToken {
             return source.currentTime;
         } else if (source instanceof AudioBufferSourceNode) {
             if (this._isPaused) {
-                return this.pauseTime;
+                return this.pauseOffset;
             } else if (this._isPlaying) {
-                return this.audioContext.currentTime - this.startTime;
+                return (this.audioContext.currentTime - this.contextStartTime) * this.rate + this.startOffset;
             }
         }
         return 0;
@@ -336,9 +356,9 @@ export class SoundToken {
         this.currentFade = fadeToken;
 
         // Start fade
-        const startTime = this.audioContext.currentTime;
-        this.gainNode.gain.setValueAtTime(from, startTime);
-        this.gainNode.gain.linearRampToValueAtTime(to, startTime + duration / 1000);
+        const startOffset = this.audioContext.currentTime;
+        this.gainNode.gain.setValueAtTime(from, startOffset);
+        this.gainNode.gain.linearRampToValueAtTime(to, startOffset + duration / 1000);
 
         // Handle completion
         setTimeout(() => {

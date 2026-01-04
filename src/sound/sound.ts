@@ -284,7 +284,7 @@ export class Sound implements IAudioProvider {
         const token = new SoundToken(this.audioContext, audioSource, {
             volume,
             rate,
-            startTime,
+            startOffset: startTime,
             duration: endTime ? endTime - startTime : 0,
         }, outputNode);
 
@@ -391,8 +391,6 @@ export class Sound implements IAudioProvider {
         this.registeredChannels.delete(channel);
     }
 
-    // ==================== Sound Public API ====================
-
     /**
      * Set the master volume of all audio.
      * @param volume - The volume value between 0 and 1.
@@ -497,6 +495,17 @@ export class Sound implements IAudioProvider {
     public async play(source: string | CachedAudio, options?: PlayOptions): Promise<SoundToken> {
         this.ensureNotDestroyed();
         this.ensureReady();
+
+        // Stop and dispose all currently playing tokens to avoid reuse of old instances
+        const existingTokens = this.masterChannel.getTokens();
+        for (const token of existingTokens) {
+            try {
+                token.stop();
+            } catch (error) {
+                // Best-effort stop; continue creating new token
+            }
+        }
+
         return this.masterChannel.play(source, options);
     }
 

@@ -2,21 +2,25 @@
     "name": "@narraleaf/sound",
     "version": "0.1.0",
     "description": "A lightweight and modern HTML audio management solution, suitable for simple web games.",
-    "main": "dist/index.js",
+    "main": "dist/index.cjs",
+    "module": "dist/index.js",
     "types": "dist/index.d.ts",
     "directories": {
         "doc": "docs"
     },
     "exports": {
         ".": {
-            "require": "./dist/index.js",
+            "import": "./dist/index.js",
+            "require": "./dist/index.cjs",
             "types": "./dist/index.d.ts"
         }
     },
     "scripts": {
-        "build:browser": "esbuild src/index.ts --bundle --platform=browser --format=esm --outfile=dist/index.js",
+        "build:esm": "npx esbuild src/index.ts --bundle --platform=browser --format=esm --outfile=dist/index.js",
+        "build:cjs": "npx esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/index.cjs",
+        "build:browser": "npm run build:esm",
         "build:types": "tsc --emitDeclarationOnly",
-        "build": "npm run build:browser -- --minify && npm run build:types",
+        "build": "npm run build:esm -- --minify && npm run build:cjs -- --minify && npm run build:types",
         "prepublishOnly": "npm run build"
     },
     "repository": {
@@ -41,6 +45,9 @@
     "type": "commonjs",
     "bugs": {
         "url": "https://github.com/NarraLeaf/Sound/issues"
+    },
+    "publishConfig": {
+        "access": "public"
     },
     "packageManager": "yarn@4.10.3+sha512.c38cafb5c7bb273f3926d04e55e1d8c9dfa7d9c3ea1f36a4868fa028b9e5f72298f0b7f401ad5eb921749eb012eb1c3bb74bf7503df3ee43fd600d14a018266f"
 }
