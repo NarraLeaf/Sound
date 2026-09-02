@@ -15,6 +15,10 @@
   - [getChannel(name: string): Channel | null](#getchannelname-string-channel--null)
   - [getChannels(): Channel[]](#getchannels-channel)
   - [load(path: string): Promise<CachedAudio>](#loadpath-string-promise-cachedaudio)
+  - [release(path: string): boolean](#releasepath-string-boolean)
+  - [unload(path: string): Promise<boolean>](#unloadpath-string-promise-boolean)
+  - [getCached(path: string): CachedAudio | null](#getcachedpath-string-cachedaudio--null)
+  - [getCacheStats(): CacheStats](#getcachestats-cachestats)
   - [destroy(): void](#destroy-void)
   - [play(path: string | CachedAudio, options?: PlayOptions): Promise<SoundToken>](#playpath-string--cachedaudio-options-playoptions-promise)
   - [getTokens(): SoundToken[]](#gettokens-soundtoken)
@@ -33,10 +37,14 @@
   - [remove(): this](#remove-this)
   - [getTokens(): SoundToken[]](#gettokens-soundtoken-1)
 - [CachedAudio](#cachedaudio)
+  - [retain(): this](#retain-this)
+  - [release(): void](#release-void)
   - [unload(): Promise<void>](#unload-promise-void)
   - [forceUnload(): Promise<void>](#forceunload-promise-void)
   - [isAlive(): boolean](#isalive-boolean)
   - [raw(): AudioBuffer](#raw-audiobuffer)
+  - [getReferenceCount(): number](#getreferencecount-number)
+  - [getPlayingCount(): number](#getplayingcount-number)
 - [SoundToken](#soundtoken)
   - [stop(StopOptions?: StopOptions): this](#stopstopoptions-stopoptions-this)
   - [setVolume(volume: number): this](#setvolumevolume-number-this-2)
@@ -94,6 +102,18 @@ interface SoundOptions {
      * @range [1, Infinity]
      */
     maxChannels: number;
+    /**
+     * Whether to silence non-critical warnings.
+     * @default false
+     */
+    silent: boolean;
+    /**
+     * How long a decoded clip stays in the cache once nothing holds it any more, in milliseconds.
+     * `0` drops it at once. See [the cache](#the-cache).
+     * @default 0
+     * @range [0, Infinity]
+     */
+    cacheReleaseDelay: number;
 }
 ```
 
@@ -197,13 +217,81 @@ channels.forEach(channel => {
 
 ### load(path: string): Promise<CachedAudio>
 
-Load a sound file and cache it.
+Load a sound file into the cache and take a reference to it.
 
 ```ts
 const cachedAudio = await sound.load("path/to/sound.mp3");
 
 someChannel.play(cachedAudio, { /* options */ }); // Play the cached audio
 ```
+
+Loading a path that is already cached does not fetch or decode it again; it hands out one more
+reference to the same clip. The clip stays decoded for as long as at least one reference is held,
+so every `load()` needs a matching [`release()`](#release-void) — see [the cache](#the-cache).
+
+### release(path: string): boolean
+
+Give back one reference on the clip cached under `path` — the counterpart of one `load()`. Returns
+`false` when nothing is cached under that path.
+
+```ts
+const theme = await sound.load("path/to/theme.mp3");
+// ... later, when the scene that needed it is over
+sound.release("path/to/theme.mp3");
+```
+
+### unload(path: string): Promise<boolean>
+
+Drop **every** reference on the clip cached under `path` and release it as soon as no token is
+playing it. Returns `false` when nothing is cached under that path.
+
+```ts
+await sound.unload("path/to/theme.mp3");
+```
+
+### getCached(path: string): CachedAudio | null
+
+The clip cached under `path`, or `null` when it is not decoded right now. Does not take a
+reference.
+
+### getCacheStats(): CacheStats
+
+What the cache is holding, which is the way to see how much memory the decoded clips occupy.
+
+```ts
+interface CacheStats {
+    /** Clips currently decoded. */
+    entries: number;
+    /** Clips currently being fetched or decoded. */
+    loading: number;
+    /** Bytes of decoded PCM held by the entries: `length * numberOfChannels * 4` per clip. */
+    decodedBytes: number;
+}
+```
+
+```ts
+const { entries, decodedBytes } = sound.getCacheStats();
+console.log(`${entries} clips, ${(decodedBytes / 1024 / 1024).toFixed(1)} MB decoded`);
+```
+
+### The cache
+
+A decoded clip is a full float32 PCM buffer: a five-minute 44.1 kHz stereo track is about 106 MB,
+whatever the size of the file it came from. Two counts decide when the cache lets one go:
+
+- **references**, held by callers. `sound.load(path)` and `cachedAudio.retain()` each add one,
+  `sound.release(path)` and `cachedAudio.release()` each give one back.
+- **playing tokens**. `channel.play(...)` holds the clip for as long as the token is playing it,
+  and gives it back when the token stops or reaches its end.
+
+When both reach zero the decoded buffer is dropped and the entry leaves the cache — immediately, or
+after `SoundOptions.cacheReleaseDelay` when one was set. Loading the same path again decodes it
+afresh and produces a new, independent handle; the dropped one stays dropped
+(`isAlive()` answers `false` and `raw()` throws).
+
+**Playing by path takes no reference at all**, so `channel.play("hit.wav", {load: "full"})` leaves
+nothing behind once the token stops. Take a reference only for a clip that must stay warm between
+plays, and give it back when it need not.
 
 ### destroy(): void
 
@@ -243,11 +331,25 @@ interface PlayOptions {
     startTime?: number;
     /**
      * The end time of the token. When the token reaches the end time, it will be stopped automatically.  
-     * When the `loop` option is true, the token will loop back to the start time.
+     * When the `loop` option is true, the token will loop back to the start time (or to `loopStart`)
+     * instead of stopping.
+     *
+     * A streamed source (`load: "stream"`) has no loop region: with `loop` it repeats the whole
+     * file and the end time is ignored.
      * @default Infinity
      * @range (startTime, Infinity]
      */
     endTime?: number;
+    /**
+     * Where each repeat of a looping token returns to, in seconds.
+     *
+     * Only consulted together with `loop` and `endTime`: the first pass starts at `startTime`,
+     * every repeat after that starts here. Leaving it out makes each repeat return to `startTime`,
+     * which is the behaviour of a clip that has no separate intro. A value outside
+     * `[startTime, endTime)` describes no playable region and falls back to `startTime`.
+     * @default startTime
+     */
+    loopStart?: number;
     /**
      * The rate of the token.
      * @default 1
@@ -269,6 +371,20 @@ interface PlayOptions {
      */
     loop?: boolean;
 }
+```
+
+An "intro then loop" piece of background music — play the whole file once, then repeat only its
+body forever:
+
+```ts
+await channel.play("theme.mp3", { loop: true, startTime: 0, loopStart: 12, endTime: 90 });
+```
+
+The same track streamed instead of decoded, which is what a long one should be. The repeat is then
+the element's own, so the region is not available:
+
+```ts
+await channel.play("theme.mp3", { load: "stream", loop: true });
 ```
 
 ### getTokens(): SoundToken[]
@@ -407,12 +523,34 @@ tokens.forEach(token => {
 
 ## CachedAudio
 
-`CachedAudio` is a class that represents a cached sound file. It can be used to play the cached audio.
+`CachedAudio` is a decoded clip in the cache, and a reference to it. `sound.load(path)` hands one
+out. What keeps it decoded, and what lets it go, is described under [the cache](#the-cache).
+
+### retain(): this
+
+Take one more reference to the clip, so that it stays decoded until this one is given back too.
+Pair it with a `release()`.
+
+```ts
+const theme = await sound.load("theme.mp3");
+theme.retain(); // two references now
+```
+
+### release(): void
+
+Give back one reference. When none are left and no token is playing the clip, the decoded buffer is
+dropped and the entry leaves the cache.
+
+```ts
+theme.release();
+```
 
 ### unload(): Promise<void>
 
-Unload the cached audio. This method will unload the audio only if there are no tokens playing the audio. This method will silently fail if the action
-is not successful.
+Drop every reference at once and release the clip as soon as no token is playing it.
+
+Resolves immediately either way: a clip that is still playing is released when the last token
+playing it stops, not when this resolves.
 
 ```ts
 await cachedAudio.unload();
@@ -424,7 +562,8 @@ if (cachedAudio.isAlive()) {
 
 ### forceUnload(): Promise<void>
 
-Force unload the cached audio. This method will unload the audio even if there are tokens playing the audio. 
+Release the clip now, even if tokens are still playing it. Those tokens play on — a source node
+holds its own reference to the buffer — but nothing new can be started from this handle.
 
 ```ts
 await cachedAudio.forceUnload();
@@ -432,17 +571,25 @@ await cachedAudio.forceUnload();
 
 ### isAlive(): boolean
 
-Check if the cached audio is alive.
+Check if the clip is still decoded.
 
 ```ts
 if (cachedAudio.isAlive()) {
-    cachedAudio.unload(); // Unload the cached audio if it is alive
+    cachedAudio.release(); // Give back the reference taken by load()
 }
 ```
 
 ### raw(): AudioBuffer
 
-Get the raw audio buffer of the cached audio.
+Get the raw audio buffer of the cached audio. Throws once the clip has been released.
+
+### getReferenceCount(): number
+
+The number of references currently held on the clip.
+
+### getPlayingCount(): number
+
+The number of tokens currently playing the clip.
 
 ## SoundToken
 

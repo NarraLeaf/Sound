@@ -1,6 +1,6 @@
 {
     "name": "@narraleaf/sound",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "A lightweight and modern HTML audio management solution, suitable for simple web games.",
     "main": "dist/index.cjs",
     "module": "dist/index.js",
@@ -21,7 +21,8 @@
         "build:browser": "npm run build:esm",
         "build:types": "tsc --emitDeclarationOnly",
         "build": "npm run build:esm -- --minify && npm run build:cjs -- --minify && npm run build:types",
-        "prepublishOnly": "npm run build"
+        "prepublishOnly": "npm run build",
+        "test": "vitest run"
     },
     "repository": {
         "type": "git",
@@ -29,7 +30,8 @@
     },
     "devDependencies": {
         "esbuild": "^0.19.0",
-        "typescript": "^5.0.0"
+        "typescript": "^5.0.0",
+        "vitest": "^3.2.4"
     },
     "keywords": [
         "narraleaf",

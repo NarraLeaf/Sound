@@ -1,11 +1,12 @@
 import { Channel } from "./channel";
 import { SoundToken } from "./soundToken";
-import { CachedAudioImpl } from "./cachedAudioImpl";
+import { AudioCache } from "./audioCache";
 import {
     SoundOptions,
     ChannelOptions,
     PlayOptions,
     CachedAudio,
+    CacheStats,
     IAudioProvider
 } from "./types";
 import { setSilentLogging, warn } from "./logger";
@@ -16,74 +17,6 @@ import { setSilentLogging, warn } from "./logger";
 const AUTO_LOAD_THRESHOLD = 10 * 1024 * 1024;
 
 /**
- * Audio cache manager for a Sound instance to avoid duplicate downloads and decoding.
- */
-class AudioCache {
-    private readonly cache = new Map<string, CachedAudio>();
-    private readonly loadingPromises = new Map<string, Promise<CachedAudio>>();
-    private readonly audioContext: AudioContext;
-
-    constructor(audioContext: AudioContext) {
-        this.audioContext = audioContext;
-    }
-
-    async load(path: string): Promise<CachedAudio> {
-        // Check if already cached
-        const cached = this.cache.get(path);
-        if (cached && cached.isAlive()) {
-            return cached;
-        }
-
-        // Check if currently loading
-        const loadingPromise = this.loadingPromises.get(path);
-        if (loadingPromise) {
-            return loadingPromise;
-        }
-
-        // Start loading
-        const promise = this.doLoad(path);
-        this.loadingPromises.set(path, promise);
-
-        try {
-            const result = await promise;
-            this.cache.set(path, result);
-            return result;
-        } finally {
-            this.loadingPromises.delete(path);
-        }
-    }
-
-    private async doLoad(path: string): Promise<CachedAudio> {
-        const response = await fetch(path);
-        const arrayBuffer = await response.arrayBuffer();
-        const audioBuffer = await this.audioContext.decodeAudioData(arrayBuffer);
-        return new CachedAudioImpl(audioBuffer);
-    }
-
-    /**
-     * Clear all cached audio data.
-     */
-    clear(): void {
-        // Force unload all cached audio
-        for (const cachedAudio of this.cache.values()) {
-            cachedAudio.forceUnload();
-        }
-        this.cache.clear();
-        this.loadingPromises.clear();
-    }
-
-    /**
-     * Get cache statistics.
-     */
-    getStats(): { cached: number; loading: number } {
-        return {
-            cached: this.cache.size,
-            loading: this.loadingPromises.size,
-        };
-    }
-}
-
-/**
  * Default options for Sound instances.
  */
 const DEFAULT_SOUND_OPTIONS: Required<SoundOptions> = {
@@ -92,6 +25,7 @@ const DEFAULT_SOUND_OPTIONS: Required<SoundOptions> = {
     sampleRate: 44100,
     maxChannels: 128,
     silent: false,
+    cacheReleaseDelay: 0,
 };
 
 /**
@@ -121,7 +55,7 @@ export class Sound implements IAudioProvider {
             sampleRate: this.options.sampleRate,
         });
 
-        this.audioCache = new AudioCache(this.audioContext);
+        this.audioCache = new AudioCache(this.audioContext, this.options.cacheReleaseDelay);
 
         // Create master channel (it doesn't count towards channel limit)
         this.masterChannel = new Channel("__master__", this, { volume: this.options.volume }, null);
@@ -249,6 +183,7 @@ export class Sound implements IAudioProvider {
             rate = 1,
             startTime = 0,
             endTime,
+            loopStart,
             load = "auto",
             loop = false,
         } = options ?? {};
@@ -264,8 +199,9 @@ export class Sound implements IAudioProvider {
             if (loadMode === "stream") {
                 audioSource = this.createStreamSource(source);
             } else {
-                // "full" mode - use cached audio buffer
-                cachedAudioRef = await this.audioCache.load(source);
+                // "full" mode. No reference is taken for the caller: the token's playing count is
+                // what holds the clip, so a play-by-path leaves nothing behind once it stops.
+                cachedAudioRef = await this.audioCache.acquire(source);
                 cachedAudioRef.addRef?.();
                 const bufferSource = this.audioContext.createBufferSource();
                 bufferSource.buffer = cachedAudioRef.raw();
@@ -280,24 +216,32 @@ export class Sound implements IAudioProvider {
             audioSource = bufferSource;
         }
 
-        // Create the token with custom output node
-        const token = new SoundToken(this.audioContext, audioSource, {
-            volume,
-            rate,
-            startOffset: startTime,
-            duration: endTime ? endTime - startTime : 0,
-        }, outputNode);
-
-        // Configure looping
+        // Configure looping before the token starts the source, so the first pass already knows
+        // where it repeats. A buffer source can repeat a region; an element can only repeat the
+        // whole file, so for a streamed source the end time has nothing to say.
+        const region = loop && endTime !== undefined && endTime > startTime
+            ? { start: Sound.clampLoopStart(loopStart, startTime, endTime), end: endTime }
+            : null;
         if (audioSource instanceof AudioBufferSourceNode) {
             audioSource.loop = loop;
-            if (loop && endTime !== undefined) {
-                audioSource.loopStart = startTime;
-                audioSource.loopEnd = endTime;
+            if (region) {
+                audioSource.loopStart = region.start;
+                audioSource.loopEnd = region.end;
             }
         } else if (audioSource instanceof HTMLAudioElement) {
             audioSource.loop = loop;
         }
+
+        // Create the token with custom output node. A looping token has no out point for the stop
+        // timer to enforce - the loop region (or the whole file) is what repeats - so the timer is
+        // only armed for a one-shot; arming it regardless used to cut a looping token off after its
+        // first pass.
+        const token = new SoundToken(this.audioContext, audioSource, {
+            volume,
+            rate,
+            startOffset: startTime,
+            duration: !loop && endTime ? endTime - startTime : 0,
+        }, outputNode);
 
         // Release cached audio reference when token ends (only once)
         if (cachedAudioRef) {
@@ -316,9 +260,26 @@ export class Sound implements IAudioProvider {
     }
 
     /**
+     * Where a looping region repeats from: the requested loop start when it lies inside the region,
+     * else the region's own start. An in point at or past the out point would describe a zero-length
+     * or inverted loop - silence forever - so it is not honoured.
+     */
+    private static clampLoopStart(requested: number | undefined, startTime: number, endTime: number): number {
+        if (requested === undefined || !Number.isFinite(requested)) {
+            return startTime;
+        }
+        return requested >= startTime && requested < endTime ? requested : startTime;
+    }
+
+    /**
      * Resolve the load mode based on the specified mode and file size.
-     * For "auto" mode, sends a HEAD request to determine file size.
-     * Files < 10MB use "full" mode, otherwise "stream" mode.
+     *
+     * For "auto" mode over http(s), a HEAD request decides: files under 10MB use "full" mode, the
+     * rest stream. Nothing but http(s) is asked: a `data:` or `blob:` URL is already in memory, so
+     * there is nothing to stream and decoding is the only cost; and a custom scheme - an
+     * application's own protocol, `file:` - cannot be counted on to answer a HEAD at all, or may
+     * answer it by serving the whole file. Those take the documented fallback, "stream", without
+     * a request.
      */
     private async resolveLoadMode(
         path: string,
@@ -326,6 +287,14 @@ export class Sound implements IAudioProvider {
     ): Promise<"stream" | "full"> {
         if (mode === "stream" || mode === "full") {
             return mode;
+        }
+
+        const scheme = Sound.schemeOf(path);
+        if (scheme === "data:" || scheme === "blob:") {
+            return "full";
+        }
+        if (scheme !== null && scheme !== "http:" && scheme !== "https:") {
+            return "stream";
         }
 
         // "auto" mode - determine based on file size
@@ -357,11 +326,30 @@ export class Sound implements IAudioProvider {
     }
 
     /**
+     * The scheme a path resolves to, against the page when there is one. `null` when it cannot be
+     * told - a relative path with no page to resolve it against - in which case it is treated as
+     * ordinary http.
+     */
+    private static schemeOf(path: string): string | null {
+        try {
+            const base = typeof location !== "undefined" && location?.href ? location.href : undefined;
+            return new URL(path, base).protocol;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
      * Create a streaming audio source using HTMLAudioElement.
      */
     private createStreamSource(path: string): HTMLAudioElement {
         const audio = new Audio(path);
         audio.crossOrigin = "anonymous";
+        // A media element corrects pitch when its rate changes and a buffer source does not; the
+        // two are the same clip to a caller, so the element is asked to behave like the buffer.
+        if ("preservesPitch" in audio) {
+            (audio as HTMLAudioElement & { preservesPitch: boolean }).preservesPitch = false;
+        }
         return audio;
     }
 
@@ -477,13 +465,56 @@ export class Sound implements IAudioProvider {
     }
 
     /**
-     * Load an audio file and cache it.
+     * Load an audio file into the cache and take a reference to it.
+     *
+     * The clip stays decoded for as long as the reference is held; give it back with
+     * {@link CachedAudio.release} (or {@link Sound.release}) when it is no longer needed, and it is
+     * dropped once nothing else holds it and no token is playing it. Loading a path that is already
+     * cached does not fetch or decode again; it hands out one more reference to the same clip.
      * @param path - The path to the audio file.
      */
     public async load(path: string): Promise<CachedAudio> {
         this.ensureNotDestroyed();
         this.ensureReady();
         return this.audioCache.load(path);
+    }
+
+    /**
+     * Give back one reference on the clip cached under `path` - the counterpart of one
+     * {@link Sound.load}. Returns `false` when nothing is cached under it.
+     * @param path - The path the clip was loaded from.
+     */
+    public release(path: string): boolean {
+        this.ensureNotDestroyed();
+        return this.audioCache.release(path);
+    }
+
+    /**
+     * Drop every reference on the clip cached under `path` and release it as soon as no token is
+     * playing it. Returns `false` when nothing is cached under it.
+     * @param path - The path the clip was loaded from.
+     */
+    public async unload(path: string): Promise<boolean> {
+        this.ensureNotDestroyed();
+        return this.audioCache.unload(path);
+    }
+
+    /**
+     * The clip cached under `path`, or `null` when it is not decoded right now. Does not take a
+     * reference.
+     * @param path - The path the clip was loaded from.
+     */
+    public getCached(path: string): CachedAudio | null {
+        this.ensureNotDestroyed();
+        return this.audioCache.get(path);
+    }
+
+    /**
+     * What the audio cache is holding: decoded clips, clips in flight, and the bytes of PCM the
+     * decoded ones occupy.
+     */
+    public getCacheStats(): CacheStats {
+        return this.audioCache.getStats();
     }
 
     /**

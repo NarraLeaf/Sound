@@ -13,6 +13,12 @@ export class AudioSourceController {
     private currentSource: AudioBufferSourceNode | HTMLAudioElement | null = null;
     private mediaElementSource: MediaElementAudioSourceNode | null = null;
     private endedHandler: ((ev: Event) => void) | null = null;
+    /**
+     * Where the source's own `ended` goes. The token installs itself here so that a clip running
+     * out passes through the token's state before its listeners hear about it; without it the
+     * listeners fired but the token still called itself playing.
+     */
+    private onSourceEnded: (() => void) | null = null;
     private gainNode: GainNode;
     private audioContext: AudioContext;
     private eventListeners: Map<string, EventListener[]> = new Map();
@@ -124,8 +130,12 @@ export class AudioSourceController {
         if (!this.currentSource) return;
 
         // Store handler so we can remove later
-        this.endedHandler = (ev: Event) => {
-            this.emit('ended');
+        this.endedHandler = () => {
+            if (this.onSourceEnded) {
+                this.onSourceEnded();
+            } else {
+                this.emit('ended');
+            }
         };
 
         if (this.currentSource instanceof HTMLAudioElement) {
@@ -148,6 +158,13 @@ export class AudioSourceController {
             this.currentSource.removeEventListener('ended', this.endedHandler);
         }
         this.endedHandler = null;
+    }
+
+    /**
+     * Route the source's natural end through `handler` instead of straight to the listeners.
+     */
+    setSourceEndedHandler(handler: (() => void) | null): void {
+        this.onSourceEnded = handler;
     }
 
     /**
@@ -241,7 +258,20 @@ export class AudioSourceController {
         if (this.currentSource instanceof AudioBufferSourceNode) {
             this.currentSource.start(when, offset);
         } else if (this.currentSource instanceof HTMLAudioElement) {
-            this.currentSource.play();
+            // The offset is the element's play head. Written even before any metadata has arrived:
+            // the element keeps it as the position to start from once it can, so a token that
+            // begins mid-file does so without waiting for a `loadedmetadata`.
+            if (offset > 0) {
+                this.currentSource.currentTime = offset;
+            }
+            const playResult = this.currentSource.play();
+            // A rejected play (autoplay policy, an unsupported source) used to surface as an
+            // unhandled rejection with nothing pointing back at the token that caused it.
+            if (playResult && typeof (playResult as Promise<void>).catch === "function") {
+                (playResult as Promise<void>).catch((error) => {
+                    warn("Failed to start HTMLAudioElement playback.", error);
+                });
+            }
         }
     }
 

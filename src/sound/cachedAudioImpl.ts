@@ -1,75 +1,173 @@
 import { CachedAudio } from "./types";
 
 /**
- * Implementation of CachedAudio interface using class-based approach to avoid closure risks.
- * Supports reference counting to track active usage.
+ * What a cached clip needs from the cache that owns it: to be taken out of the table once its
+ * buffer is gone, so that the next load of the same path decodes afresh instead of finding a dead
+ * entry.
+ */
+export interface CachedAudioOwner {
+    evict(entry: CachedAudioImpl): void;
+}
+
+/**
+ * A decoded clip and the two counts that keep it alive.
+ *
+ * `references` are held by callers - every {@link Sound.load} hands one out and every
+ * {@link CachedAudio.retain} adds one - and `playing` is the number of tokens currently playing
+ * the buffer. The buffer is dropped when both reach zero, which is checked every time either one
+ * is decremented; it is never dropped on the strength of the counts alone, so a clip that was
+ * loaded and never touched again stays until something gives it back.
+ *
+ * A source node keeps its own reference to the `AudioBuffer` it was given, so dropping the
+ * cache's does not cut off a token that is still playing: `forceUnload` and a finished grace
+ * delay both leave running tokens alone and only prevent new ones.
  */
 export class CachedAudioImpl implements CachedAudio {
-    private readonly audioBuffer: AudioBuffer;
-    private alive: boolean = true;
-    private refCount: number = 0;
+    private audioBuffer: AudioBuffer | null;
+    private references = 0;
+    private playing = 0;
+    /**
+     * Set by `unload()`: drop the buffer the moment the last token stops, grace delay or not.
+     */
+    private dropWhenIdle = false;
+    private releaseTimer: ReturnType<typeof setTimeout> | null = null;
 
-    constructor(audioBuffer: AudioBuffer) {
+    constructor(
+        audioBuffer: AudioBuffer,
+        private readonly owner: CachedAudioOwner,
+        private readonly releaseDelay: number,
+    ) {
         this.audioBuffer = audioBuffer;
     }
 
+    retain(): this {
+        this.references++;
+        // A new reference is somebody wanting the clip, which countermands a pending unload.
+        this.dropWhenIdle = false;
+        this.cancelPendingRelease();
+        return this;
+    }
+
+    release(): void {
+        if (this.references > 0) {
+            this.references--;
+        }
+        this.reconsider();
+    }
+
     /**
-     * Increment the reference count. Called when a token starts using this audio.
+     * A token started playing the buffer.
+     * @internal
      */
     addRef(): void {
-        this.refCount++;
+        this.playing++;
+        this.cancelPendingRelease();
     }
 
     /**
-     * Decrement the reference count. Called when a token stops using this audio.
+     * A token stopped playing the buffer.
+     * @internal
      */
     releaseRef(): void {
-        if (this.refCount > 0) {
-            this.refCount--;
+        if (this.playing > 0) {
+            this.playing--;
         }
+        this.reconsider();
+    }
+
+    getReferenceCount(): number {
+        return this.references;
+    }
+
+    getPlayingCount(): number {
+        return this.playing;
     }
 
     /**
-     * Get the current reference count.
+     * The number of tokens currently playing the clip.
+     * @deprecated Use {@link CachedAudioImpl.getPlayingCount}; the name no longer says which count it is.
      */
     getRefCount(): number {
-        return this.refCount;
+        return this.playing;
     }
 
-    /**
-     * Unload the cached audio. Will fail silently if tokens are still playing.
-     */
     async unload(): Promise<void> {
-        // Only unload if no tokens are using it
-        if (this.refCount > 0) {
-            // Silently fail - tokens are still using this audio
-            return;
-        }
-        this.alive = false;
+        this.references = 0;
+        this.dropWhenIdle = true;
+        this.reconsider();
     }
 
-    /**
-     * Force unload the cached audio, even if tokens are still playing.
-     */
     async forceUnload(): Promise<void> {
-        this.alive = false;
-        this.refCount = 0;
+        this.drop();
     }
 
-    /**
-     * Check if the cached audio is still valid.
-     */
     isAlive(): boolean {
-        return this.alive;
+        return this.audioBuffer !== null;
     }
 
-    /**
-     * Get the raw audio buffer.
-     */
     raw(): AudioBuffer {
-        if (!this.alive) {
+        if (!this.audioBuffer) {
             throw new Error("CachedAudio has been unloaded.");
         }
         return this.audioBuffer;
+    }
+
+    /**
+     * Bytes of decoded PCM this clip holds, or 0 once released.
+     */
+    byteLength(): number {
+        if (!this.audioBuffer) {
+            return 0;
+        }
+        return this.audioBuffer.length * this.audioBuffer.numberOfChannels * 4;
+    }
+
+    /**
+     * Decoded, and held by nobody: the state in which the buffer may go.
+     */
+    private isIdle(): boolean {
+        return this.audioBuffer !== null && this.references === 0 && this.playing === 0;
+    }
+
+    /**
+     * Drop the buffer if nothing holds the clip any more - after the grace delay, when there is
+     * one and the clip was not unloaded outright.
+     */
+    private reconsider(): void {
+        if (!this.isIdle()) {
+            return;
+        }
+        if (this.releaseDelay > 0 && !this.dropWhenIdle) {
+            if (!this.releaseTimer) {
+                this.releaseTimer = setTimeout(() => {
+                    this.releaseTimer = null;
+                    // Re-checked rather than assumed: a retain or a new token cancels the timer,
+                    // but one that raced the callback must still not drop a held clip.
+                    if (this.isIdle()) {
+                        this.drop();
+                    }
+                }, this.releaseDelay);
+            }
+            return;
+        }
+        this.drop();
+    }
+
+    private cancelPendingRelease(): void {
+        if (this.releaseTimer) {
+            clearTimeout(this.releaseTimer);
+            this.releaseTimer = null;
+        }
+    }
+
+    private drop(): void {
+        this.cancelPendingRelease();
+        if (!this.audioBuffer) {
+            return;
+        }
+        this.audioBuffer = null;
+        this.references = 0;
+        this.playing = 0;
+        this.owner.evict(this);
     }
 }

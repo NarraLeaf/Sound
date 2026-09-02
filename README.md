@@ -88,18 +88,35 @@ channel.mute(false); // Unmute the channel
 channel.unmute(); // Unmute the channel
 ```
 
-To cache the audio:  
+To keep an audio file decoded between plays:  
 ```ts
-const sfx = await sound.load("path/to/sound.mp3");
+const sfx = await sound.load("path/to/sound.mp3"); // fetched, decoded, and referenced
 
 // Use the sfx
 await channel.play(sfx, { /* options */ });
 
-// Unload the sfx
+// Give the reference back when it need not stay warm any more. The decoded buffer is dropped once
+// nothing holds it and no token is playing it.
+sfx.release();
+
+// Or drop every reference at once; the clip goes as soon as it stops playing.
 await sfx.unload();
-// Note: The `unload` method does not always succeed when multiple tokens are playing the same sfx.
-// To force unload the sfx, you can use the `forceUnload` method.
+// `unload` waits for the tokens playing the clip. To take the buffer out from under them:
 await sfx.forceUnload();
+
+// What is decoded right now, and what it costs.
+console.log(sound.getCacheStats()); // { entries, loading, decodedBytes }
+```
+
+A clip played straight from its path takes no reference, so nothing stays behind once it stops:  
+```ts
+await channel.play("path/to/sound.mp3", { load: "full" });
+```
+
+Long audio should not be decoded at all. Stream it through an `<audio>` element instead — no
+decoded buffer, and it starts as soon as the first bytes arrive:  
+```ts
+const bgm = await channel.play("path/to/theme.mp3", { load: "stream", loop: true });
 ```
 
 ## License

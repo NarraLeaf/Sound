@@ -17,8 +17,20 @@ const token = await channel.play("path/to/sound.mp3", {
 ```
 
 If the `auto` mode is used, Sound will send a HEAD request to the server to determine the size of the audio file. If the size is less than 10MB, it
-will use "stream" mode. Otherwise, it will use "full" mode.  
-If the server does not support HEAD requests or returned invalid response, it will fallback to "stream" mode.
+will use "full" mode. Otherwise, it will use "stream" mode.  
+If the server does not support HEAD requests or returned an invalid response, it will fall back to "stream" mode.
+
+Only `http:` and `https:` sources are asked. The others are decided without a request:
+
+- `data:` and `blob:` sources are already in memory, so there is nothing to stream and decoding is
+  the only cost — those use "full" mode.
+- Any other scheme — an application's own protocol such as `app://`, or `file:` — cannot be counted
+  on to answer a HEAD at all, and a handler that does not implement it may answer by serving the
+  whole file. Those take the documented fallback, "stream", without a request.
+
+An application serving its assets over a custom protocol therefore gets streaming for everything
+under `auto`, which is right for music and wrong for short effects. **Say which one you want**: an
+explicit `load: "full"` or `load: "stream"` is honoured as given and never sends a request.
 
 When using `sound.load`, the audio will be forced to be loaded into memory.
 
@@ -34,6 +46,41 @@ Its advantages include extremely low playback latency, high control precision, a
 
 In other words, stream mode is better suited for continuous playback of long audio, while full mode is better suited for instant triggering of short
 sound effects.
+
+The one thing full mode can express that stream mode cannot is a **loop region**. A decoded buffer
+repeats a marked section of itself sample-accurately (`startTime`, `loopStart`, `endTime`); an
+`<audio>` element only repeats the whole file, so a streamed token ignores `endTime` and
+`loopStart` when it loops.
+
+## The Audio Cache
+
+Every clip played in full mode is decoded once and kept in a per-`Sound` cache, keyed by the path it
+was loaded from. A decoded clip is a float32 PCM buffer whose size has nothing to do with the size
+of the file: a five-minute 44.1 kHz stereo track is about 106 MB decoded whatever it was encoded as.
+So what the cache keeps, and for how long, is the difference between a game that holds a few tens of
+megabytes and one that grows for the length of a session.
+
+Two counts decide when a clip is let go:
+
+- **references**, held by callers — `sound.load(path)` and `cachedAudio.retain()` each add one,
+  `sound.release(path)` and `cachedAudio.release()` each give one back;
+- **playing tokens** — a token holds the clip from the moment it starts to the moment it stops or
+  reaches its end.
+
+When both reach zero the decoded buffer is dropped and the entry leaves the cache. A short
+`SoundOptions.cacheReleaseDelay` keeps it for that long first, so a clip replayed in quick
+succession is not fetched and decoded again each time; `0`, the default, drops it at once.
+
+Playing **by path** takes no reference of its own, so `channel.play("hit.wav", {load: "full"})`
+leaves nothing behind once its token stops. Take a reference only for a clip that must stay warm
+between plays — a scene's sound effects, say — and give it back when the scene is over.
+
+Dropping a buffer never cuts off a token that is already playing it: a source node holds its own
+reference to the buffer it was given, so `forceUnload()` and an expiring grace delay both leave
+running tokens alone and only prevent new ones from starting off that handle.
+
+`sound.getCacheStats()` reports what is held right now — how many clips, how many are in flight, and
+how many bytes of PCM the decoded ones occupy.
 
 ## Audio Control Behaviors
 

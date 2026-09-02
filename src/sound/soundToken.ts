@@ -62,9 +62,16 @@ export class SoundToken {
         this.gainNode.gain.value = this.volume;
         this.gainNode.connect(this.outputNode);
 
-        // Create source controller and set initial source
+        // Create source controller and set initial source. A clip running out reaches the
+        // listeners through this token's `emit`, which is what turns `isPlaying()` off.
         this.sourceController = new AudioSourceController(audioContext, this.gainNode);
+        this.sourceController.setSourceEndedHandler(() => this.emit("ended"));
         this.sourceController.setSource(source);
+
+        // The rate the token was asked for has to reach the source before it starts; it used to
+        // be recorded here and only written by a later `setRate`, so a `rate` in the play options
+        // did nothing.
+        this.applyRate(source);
 
         // Auto start playback
         const offset = this.startOffset;
@@ -89,6 +96,7 @@ export class SoundToken {
         // Handle internal state changes
         if (event === "ended") {
             this._isPlaying = false;
+            this._isPaused = false;
             // Clean up resources on natural end
             try {
                 this.gainNode.disconnect();
@@ -254,15 +262,19 @@ export class SoundToken {
     setRate(rate: number): this {
         rate = Math.max(0.001, rate); // Prevent division by zero
         this.rate = rate;
-
-        const source = this.sourceController.getSource();
-        if (source instanceof HTMLAudioElement) {
-            source.playbackRate = rate;
-        } else if (source instanceof AudioBufferSourceNode) {
-            source.playbackRate.value = rate;
-        }
-
+        this.applyRate(this.sourceController.getSource());
         return this;
+    }
+
+    /**
+     * Write the token's rate onto whichever kind of source it is playing through.
+     */
+    private applyRate(source: AudioBufferSourceNode | HTMLAudioElement | null): void {
+        if (source instanceof HTMLAudioElement) {
+            source.playbackRate = this.rate;
+        } else if (source instanceof AudioBufferSourceNode) {
+            source.playbackRate.value = this.rate;
+        }
     }
 
     getRate(): number {
