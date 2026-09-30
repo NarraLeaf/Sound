@@ -83,14 +83,6 @@ export class CachedAudioImpl implements CachedAudio {
         return this.playing;
     }
 
-    /**
-     * The number of tokens currently playing the clip.
-     * @deprecated Use {@link CachedAudioImpl.getPlayingCount}; the name no longer says which count it is.
-     */
-    getRefCount(): number {
-        return this.playing;
-    }
-
     async unload(): Promise<void> {
         this.references = 0;
         this.dropWhenIdle = true;
