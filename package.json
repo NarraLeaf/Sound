@@ -1,6 +1,6 @@
 {
     "name": "@narraleaf/sound",
-    "version": "0.2.0",
+    "version": "1.0.0",
     "description": "A lightweight and modern HTML audio management solution, suitable for simple web games.",
     "main": "dist/index.cjs",
     "module": "dist/index.js",
