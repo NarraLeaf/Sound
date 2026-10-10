@@ -97,4 +97,47 @@ describe("a decoded token", () => {
         expect(context.bufferSources[1]).toMatchObject({ loop: true, loopStart: 12, loopEnd: 30 });
         expect(context.bufferSources[1].starts).toEqual([{ when: 0, offset: 20 }]);
     });
+
+    it("reads the play head where a seek put it, and from there on", async () => {
+        const channel = sound.createChannel("voice");
+        const context = fake.contexts[0];
+        context.currentTime = 0.07;
+        const token = await channel.play(await sound.load("line.wav"));
+        context.currentTime = 0.13;
+
+        token.seek(2.5);
+
+        // The new session starts at 2.5 s into the clip, now - not 2.5 s before now.
+        expect(context.bufferSources[1].starts).toEqual([{ when: 0, offset: 2.5 }]);
+        expect(token.getCurrentTime()).toBeCloseTo(2.5, 9);
+        context.currentTime = 1.13;
+        expect(token.getCurrentTime()).toBeCloseTo(3.5, 9);
+    });
+
+    it("counts the time after a seek at the token's rate", async () => {
+        const channel = sound.createChannel("voice");
+        const context = fake.contexts[0];
+        const token = await channel.play(await sound.load("line.wav"), { rate: 2 });
+        context.currentTime = 1;
+
+        token.seek(4);
+        context.currentTime = 1.5;
+
+        expect(token.getCurrentTime()).toBeCloseTo(5, 9);
+    });
+
+    it("pauses and resumes where a seek left the play head", async () => {
+        const channel = sound.createChannel("voice");
+        const context = fake.contexts[0];
+        const token = await channel.play(await sound.load("line.wav"));
+        context.currentTime = 0.5;
+
+        token.seek(10);
+        context.currentTime = 1.5;
+        token.pause();
+
+        expect(token.getCurrentTime()).toBeCloseTo(11, 9);
+        token.resume();
+        expect(context.bufferSources[2].starts).toEqual([{ when: 0, offset: expect.closeTo(11, 9) }]);
+    });
 });
