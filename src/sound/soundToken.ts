@@ -301,7 +301,10 @@ export class SoundToken {
                     newSource.loopStart = source.loopStart;
                     newSource.loopEnd = source.loopEnd;
                     this.sourceController.refreshSource(newSource);
-                    this.startOffset = this.audioContext.currentTime - time;
+                    // A new session: it begins now, at `time` into the clip. Both halves have to
+                    // move - `getCurrentTime` counts from `contextStartTime` and adds `startOffset`.
+                    this.startOffset = time;
+                    this.contextStartTime = this.audioContext.currentTime;
                     this.sourceController.start(0, time);
                 } else if (this._isPaused) {
                     // Paused - just update the pause time, will be used on resume
